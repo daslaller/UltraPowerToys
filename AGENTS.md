@@ -163,3 +163,44 @@ Before finishing, verify:
 ### Instructions (Auto-Applied)
 - [Runner & Settings UI](.github/instructions/runner-settings-ui.instructions.md)
 - [Common Libraries](.github/instructions/common-libraries.instructions.md)
+
+## Cursor Cloud specific instructions
+
+### Platform constraint
+
+PowerToys is a **Windows-only** desktop application. All C++/C# projects target `net9.0-windows10.0.26100.0` and MSVC with Windows SDK. The full solution (`PowerToys.slnx`) **cannot be built or tested on Linux**. `dotnet restore` on the full solution fails due to missing C++ toolchain and case-sensitivity issues (e.g. `Common/` vs `common/` in paths).
+
+### What works on Linux (Cloud Agent VMs)
+
+| Capability | Command | Notes |
+|---|---|---|
+| Git submodules | `git submodule update --init --recursive` | Required before any build; deps: spdlog, expected-lite |
+| .NET tool restore | `dotnet tool restore` | Restores `xstyler` (XAML linter) and `dotnet-consolidate` |
+| XAML lint check | `dotnet xstyler --passive --file <path>` or `--directory <dir>` | Verifies XAML formatting without modifying files |
+| Package consolidation check | `dotnet dotnet-consolidate -s PowerToys.slnx` | Checks NuGet package version consistency (may emit warnings about missing projects) |
+| MCP dev server | `cd tools/mcp/github-artifacts && npm install && npm start` | Node.js MCP server for GitHub issue image/attachment fetching; the only runnable service |
+| MCP server tests | `cd tools/mcp/github-artifacts && npm test` | Requires `GITHUB_TOKEN` env var for API calls |
+| Code review / static analysis | Read/grep C#, C++, XAML source | No compilation needed for code reviews |
+
+### .NET SDK setup
+
+The update script installs .NET 9.0 SDK and .NET 8.0 runtime (needed by `dotnet-consolidate`) to `$HOME/.dotnet`. The PATH is configured in `~/.bashrc`:
+```
+export PATH="$HOME/.dotnet:$HOME/.dotnet/tools:$PATH"
+export DOTNET_ROOT="$HOME/.dotnet"
+```
+
+### Key limitations for Cloud Agents
+
+- **No MSBuild/compilation**: Cannot build `.csproj`, `.vcxproj`, or `.slnx` projects. Build validation requires Windows + Visual Studio 2022/2026.
+- **No `dotnet test`**: The repo advises against `dotnet test` even on Windows; use VS Test Explorer or `vstest.console.exe`.
+- **No UI testing**: WinAppDriver + Developer Mode on Windows required.
+- **Case sensitivity**: Linux filesystem is case-sensitive; some solution/project references use different casing than actual directory names (e.g. `Common/` vs `common/`). This breaks `dotnet restore` for the full solution.
+
+### Practical workflow for Cloud Agents
+
+1. Make code changes (C#, C++, XAML, docs, scripts).
+2. Run `dotnet xstyler --passive --file <changed.xaml>` for XAML formatting checks.
+3. For code review tasks, rely on static analysis (reading code, grepping patterns).
+4. For the MCP dev tool (`tools/mcp/github-artifacts/`), run `npm test` to validate changes.
+5. Build/test validation must be deferred to Windows CI or a Windows dev environment.
