@@ -915,6 +915,12 @@ Right-click to remove the key combination, thereby deactivating the shortcut.</v
   <data name="ConfigureShortcutText.Text" xml:space="preserve">
     <value>Assign shortcut</value>
   </data>
+  <data name="DockAppearance_AutoHide_SettingsCard.Header" xml:space="preserve">
+    <value>Automatically hide the Dock</value>
+  </data>
+  <data name="DockAppearance_AutoHide_SettingsCard.Description" xml:space="preserve">
+    <value>The Dock hides when the mouse moves away and reappears when the mouse approaches the screen edge</value>
+  </data>
   <data name="DockAppearance_DockPosition_SettingsCard.Header" xml:space="preserve">
     <value>Position</value>
   </data>

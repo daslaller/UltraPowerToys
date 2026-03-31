@@ -67,6 +67,11 @@
                         </ComboBox>
                     </controls:SettingsCard>
 
+                    <!--  Auto-hide  -->
+                    <controls:SettingsCard x:Uid="DockAppearance_AutoHide_SettingsCard" HeaderIcon="{ui:FontIcon Glyph=&#xE76C;}">
+                        <ToggleSwitch IsOn="{x:Bind ViewModel.Dock_AutoHide, Mode=TwoWay}" />
+                    </controls:SettingsCard>
+
                     <controls:SettingsCard x:Uid="DockAppearance_AppTheme_SettingsCard" HeaderIcon="{ui:FontIcon Glyph=&#xE793;}">
                         <ComboBox MinWidth="{StaticResource SettingActionControlMinWidth}" SelectedIndex="{x:Bind ViewModel.DockAppearance.ThemeIndex, Mode=TwoWay}">
                             <ComboBoxItem x:Uid="Settings_GeneralPage_AppTheme_Mode_System_Automation" Tag="Default">

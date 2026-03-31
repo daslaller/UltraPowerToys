@@ -62,6 +62,13 @@ public sealed partial class DockWindow : WindowEx,
     private DockSize _lastSize;
     private bool _isDisposed;
 
+    // Auto-hide state
+    private bool _isAutoHideEnabled;
+    private bool _isAutoHidden;
+    private bool _isFullScreenAppActive;
+    private DispatcherQueueTimer? _autoHideTimer;
+    private DispatcherQueueTimer? _edgeDetectionTimer;
+
     // Store the original WndProc
     private WNDPROC? _originalWndProc;
     private WNDPROC? _customWndProc;
@@ -129,6 +136,17 @@ public sealed partial class DockWindow : WindowEx,
         _ = PInvoke.SetWindowLong(_hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE, (int)style);
 
         ShowDesktop.AddHook(this);
+
+        _autoHideTimer = DispatcherQueue.CreateTimer();
+        _autoHideTimer.Interval = TimeSpan.FromMilliseconds(400);
+        _autoHideTimer.IsRepeating = false;
+        _autoHideTimer.Tick += AutoHideTimer_Tick;
+
+        _edgeDetectionTimer = DispatcherQueue.CreateTimer();
+        _edgeDetectionTimer.Interval = TimeSpan.FromMilliseconds(100);
+        _edgeDetectionTimer.IsRepeating = true;
+        _edgeDetectionTimer.Tick += EdgeDetectionTimer_Tick;
+
         UpdateSettingsOnUiThread();
     }
 
@@ -162,12 +180,13 @@ public sealed partial class DockWindow : WindowEx,
 
         _dock.UpdateSettings(_settings);
         var side = DockSettingsToViews.GetAppBarEdge(_settings.Side);
+        var autoHideChanged = _isAutoHideEnabled != _settings.AutoHide;
 
         if (_appBarData.hWnd != IntPtr.Zero)
         {
             var sameEdge = _appBarData.uEdge == side;
             var sameSize = _lastSize == _settings.DockSize;
-            if (sameEdge && sameSize)
+            if (sameEdge && sameSize && !autoHideChanged)
             {
                 return;
             }
@@ -175,7 +194,9 @@ public sealed partial class DockWindow : WindowEx,
             DestroyAppBar(_hwnd);
         }
 
+        _isAutoHideEnabled = _settings.AutoHide;
         CreateAppBar(_hwnd);
+        ApplyAutoHideState();
     }
 
     private void InitializeBackdropSupport()
@@ -325,12 +346,20 @@ public sealed partial class DockWindow : WindowEx,
         _lastSize = _settings.DockSize;
 
         UpdateWindowPosition();
+
+        if (_isAutoHideEnabled)
+        {
+            // Register as an auto-hide bar with the shell
+            _appBarData.lParam = (nint)PInvoke.ABS_AUTOHIDE;
+            PInvoke.SHAppBarMessage(PInvoke.ABM_SETAUTOHIDEBAR, ref _appBarData);
+        }
     }
 
     private void DestroyAppBar(HWND hwnd)
     {
         PInvoke.SHAppBarMessage(PInvoke.ABM_REMOVE, ref _appBarData);
         _appBarData = default;
+        _isAutoHidden = false;
     }
 
     private void UpdateWindowPosition()
@@ -375,13 +404,6 @@ public sealed partial class DockWindow : WindowEx,
         }
 
         PInvoke.SHAppBarMessage(PInvoke.ABM_SETPOS, ref _appBarData);
-
-        // TODO: investigate ABS_AUTOHIDE and auto hide bars.
-        // I think it's something like this, but I don't totally know
-        //   _appBarData.lParam = ABS_ALWAYSONTOP;
-        //   _appBarData.lParam = (LPARAM)(int)PInvoke.ABS_AUTOHIDE;
-        //   PInvoke.SHAppBarMessage(ABM_SETSTATE, ref _appBarData);
-        //   PInvoke.SHAppBarMessage(PInvoke.ABM_SETAUTOHIDEBAR, ref _appBarData);
 
         // Account for system borders when moving the window
         // Adjust position to account for window frame/border
@@ -484,27 +506,25 @@ public sealed partial class DockWindow : WindowEx,
             }
         }
 
-        // Stop min/max on WM_WINDOWPOSCHANGING too
+        // Stop min/max on WM_WINDOWPOSCHANGING too (unless auto-hide is sliding the dock off-screen)
         else if (msg == PInvoke.WM_WINDOWPOSCHANGING)
         {
-            unsafe
+            if (!_isAutoHidden)
             {
-                var pWindowPos = (WINDOWPOS*)lParam.Value;
-
-                // Check if the window is being hidden (minimized) or if flags suggest minimize/maximize
-                if ((pWindowPos->flags & SET_WINDOW_POS_FLAGS.SWP_HIDEWINDOW) != 0)
+                unsafe
                 {
-                    // Prevent hiding the window (minimize)
-                    pWindowPos->flags &= ~SET_WINDOW_POS_FLAGS.SWP_HIDEWINDOW;
-                    pWindowPos->flags |= SET_WINDOW_POS_FLAGS.SWP_SHOWWINDOW;
-                }
+                    var pWindowPos = (WINDOWPOS*)lParam.Value;
 
-                // Additional check: if the window position suggests it's being minimized or maximized
-                // by checking for dramatic size changes
-                if (pWindowPos->cx <= 0 || pWindowPos->cy <= 0)
-                {
-                    // Prevent zero or negative size changes (minimize)
-                    pWindowPos->flags |= SET_WINDOW_POS_FLAGS.SWP_NOSIZE;
+                    if ((pWindowPos->flags & SET_WINDOW_POS_FLAGS.SWP_HIDEWINDOW) != 0)
+                    {
+                        pWindowPos->flags &= ~SET_WINDOW_POS_FLAGS.SWP_HIDEWINDOW;
+                        pWindowPos->flags |= SET_WINDOW_POS_FLAGS.SWP_SHOWWINDOW;
+                    }
+
+                    if (pWindowPos->cx <= 0 || pWindowPos->cy <= 0)
+                    {
+                        pWindowPos->flags |= SET_WINDOW_POS_FLAGS.SWP_NOSIZE;
+                    }
                 }
             }
         }
@@ -520,13 +540,12 @@ public sealed partial class DockWindow : WindowEx,
             }
         }
 
-        // Handle WM_SHOWWINDOW to prevent hiding (minimize)
+        // Handle WM_SHOWWINDOW to prevent hiding (unless auto-hide is active)
         else if (msg == PInvoke.WM_SHOWWINDOW)
         {
             var isBeingShown = wParam.Value != 0;
-            if (!isBeingShown)
+            if (!isBeingShown && !_isAutoHidden)
             {
-                // Prevent hiding the window
                 return new LRESULT(0);
             }
         }
@@ -558,18 +577,177 @@ public sealed partial class DockWindow : WindowEx,
             {
                 UpdateWindowPosition();
             }
+            else if (wParam.Value == PInvoke.ABN_FULLSCREENAPP)
+            {
+                _isFullScreenAppActive = lParam.Value != 0;
+                if (_isAutoHideEnabled)
+                {
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        if (_isFullScreenAppActive)
+                        {
+                            SlideOut();
+                        }
+                        else
+                        {
+                            SlideIn();
+                        }
+                    });
+                }
+            }
         }
         else if (msg == WM_TASKBAR_RESTART)
         {
             Logger.LogDebug("WM_TASKBAR_RESTART");
 
-            DispatcherQueue.TryEnqueue(() => CreateAppBar(_hwnd));
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                CreateAppBar(_hwnd);
+                ApplyAutoHideState();
+            });
 
             WeakReferenceMessenger.Default.Send<BringToTopMessage>(new(false));
         }
 
         // Call the original window procedure for all other messages
         return PInvoke.CallWindowProc(_originalWndProc, hwnd, msg, wParam, lParam);
+    }
+
+    private void ApplyAutoHideState()
+    {
+        if (_isAutoHideEnabled)
+        {
+            _edgeDetectionTimer?.Start();
+        }
+        else
+        {
+            _edgeDetectionTimer?.Stop();
+            _autoHideTimer?.Stop();
+            if (_isAutoHidden)
+            {
+                SlideIn();
+            }
+        }
+    }
+
+    private void AutoHideTimer_Tick(DispatcherQueueTimer sender, object args)
+    {
+        sender.Stop();
+        if (!_isAutoHideEnabled || _isAutoHidden)
+        {
+            return;
+        }
+
+        if (!IsCursorOverDock())
+        {
+            SlideOut();
+        }
+    }
+
+    private void EdgeDetectionTimer_Tick(DispatcherQueueTimer sender, object args)
+    {
+        if (!_isAutoHideEnabled)
+        {
+            return;
+        }
+
+        if (_isAutoHidden && IsCursorAtDockEdge())
+        {
+            SlideIn();
+        }
+        else if (!_isAutoHidden && !IsCursorOverDock())
+        {
+            _autoHideTimer?.Start();
+        }
+        else if (!_isAutoHidden && IsCursorOverDock())
+        {
+            _autoHideTimer?.Stop();
+        }
+    }
+
+    private bool IsCursorOverDock()
+    {
+        PInvoke.GetCursorPos(out var pt);
+        PInvoke.GetWindowRect(_hwnd, out var rect);
+        return pt.X >= rect.left && pt.X <= rect.right &&
+               pt.Y >= rect.top && pt.Y <= rect.bottom;
+    }
+
+    private bool IsCursorAtDockEdge()
+    {
+        PInvoke.GetCursorPos(out var pt);
+        var screenWidth = PInvoke.GetSystemMetrics(SYSTEM_METRICS_INDEX.SM_CXSCREEN);
+        var screenHeight = PInvoke.GetSystemMetrics(SYSTEM_METRICS_INDEX.SM_CYSCREEN);
+        const int edgeThreshold = 2;
+
+        return _settings.Side switch
+        {
+            DockSide.Top => pt.Y <= edgeThreshold,
+            DockSide.Bottom => pt.Y >= screenHeight - edgeThreshold,
+            DockSide.Left => pt.X <= edgeThreshold,
+            DockSide.Right => pt.X >= screenWidth - edgeThreshold,
+            _ => false,
+        };
+    }
+
+    private void SlideOut()
+    {
+        if (_isAutoHidden)
+        {
+            return;
+        }
+
+        _isAutoHidden = true;
+        PInvoke.GetWindowRect(_hwnd, out var rect);
+        var width = rect.right - rect.left;
+        var height = rect.bottom - rect.top;
+
+        // Slide the dock off-screen, leaving a 1-pixel strip for edge detection
+        var (x, y) = _settings.Side switch
+        {
+            DockSide.Top => (rect.left, rect.top - height + 1),
+            DockSide.Bottom => (rect.left, rect.bottom - 1),
+            DockSide.Left => (rect.left - width + 1, rect.top),
+            DockSide.Right => (rect.right - 1, rect.top),
+            _ => (rect.left, rect.top),
+        };
+
+        PInvoke.SetWindowPos(
+            _hwnd,
+            HWND.HWND_TOPMOST,
+            x,
+            y,
+            width,
+            height,
+            SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
+    }
+
+    private void SlideIn()
+    {
+        if (!_isAutoHidden)
+        {
+            return;
+        }
+
+        _isAutoHidden = false;
+        UpdateWindowPosition();
+
+        PInvoke.SetWindowPos(
+            _hwnd,
+            HWND.HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SET_WINDOW_POS_FLAGS.SWP_NOMOVE | SET_WINDOW_POS_FLAGS.SWP_NOSIZE | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
+        PInvoke.SetWindowPos(
+            _hwnd,
+            HWND.HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SET_WINDOW_POS_FLAGS.SWP_NOMOVE | SET_WINDOW_POS_FLAGS.SWP_NOSIZE | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
     }
 
     void IRecipient<BringToTopMessage>.Receive(BringToTopMessage message)
@@ -687,6 +865,9 @@ public sealed partial class DockWindow : WindowEx,
         }
 
         _isDisposed = true;
+
+        _autoHideTimer?.Stop();
+        _edgeDetectionTimer?.Stop();
 
         _settingsService?.SettingsChanged -= SettingsChangedHandler;
 
