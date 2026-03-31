@@ -18,6 +18,8 @@ public record DockSettings
 {
     public DockSide Side { get; init; } = DockSide.Top;
 
+    public bool AutoHide { get; init; }
+
     public DockSize DockSize { get; init; } = DockSize.Small;
 
     public DockSize DockIconsSize { get; init; } = DockSize.Small;
